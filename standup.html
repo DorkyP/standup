@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Standup Tracker</title>
+<style>
+  body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: linear-gradient(135deg, #0f172a, #020617);
+    color: #e2e8f0;
+    display: flex;
+    justify-content: center;
+    padding: 40px 16px;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 500px;
+    background: rgba(15, 23, 42, 0.8);
+    border: 1px solid rgba(148, 163, 184, 0.1);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+    backdrop-filter: blur(10px);
+  }
+
+  h1 {
+    text-align: center;
+    margin-bottom: 24px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .person {
+    padding: 14px 16px;
+    margin: 10px 0;
+    border-radius: 12px;
+    cursor: pointer;
+    background: rgba(30, 41, 59, 0.6);
+    transition: all 0.2s ease;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .person:hover {
+    background: rgba(51, 65, 85, 0.8);
+    transform: translateY(-1px);
+  }
+
+  .person:active {
+    transform: scale(0.98);
+  }
+
+  .done {
+    text-decoration: line-through;
+    opacity: 0.5;
+  }
+
+  .indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #64748b;
+  }
+
+  .person.active .indicator {
+    background: #22c55e;
+    box-shadow: 0 0 10px #22c55e;
+  }
+
+  .person.edit {
+    outline: 1px dashed #facc15;
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1 id="title">Standup</h1>
+  <div id="list"></div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+<script>
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "jc-standup.firebaseapp.com",
+  databaseURL: "https://jc-standup-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "jc-standup",
+  storageBucket: "jc-standup.firebasestorage.app",
+  messagingSenderId: "880971545039",
+  appId: "1:880971545039:web:f3a8820e1843a8a261baba"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+const configRef = db.ref("standup/config/people");
+
+let peopleList = [];
+let appStarted = false;
+let editMode = false;
+
+// 🧠 AEST helper
+function getAESTDateParts() {
+  const now = new Date();
+
+  const parts = new Intl.DateTimeFormat('en-AU', {
+    timeZone: 'Australia/Sydney',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hour12: false
+  }).formatToParts(now);
+
+  const map = {};
+  parts.forEach(p => map[p.type] = p.value);
+
+  return {
+    dateStr: `${map.year}-${map.month}-${map.day}`,
+    hour: parseInt(map.hour, 10)
+  };
+}
+
+// 🗓 Title
+document.getElementById("title").innerText =
+  "Standup – " + new Date().toLocaleDateString('en-AU', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'short'
+  });
+
+// 🔓 Secret edit toggle (5 taps)
+let tapCount = 0;
+
+document.getElementById("title").onclick = () => {
+  tapCount++;
+
+  if (tapCount >= 5) {
+    editMode = !editMode;
+    tapCount = 0;
+
+    alert(editMode ? "🔓 Edit mode" : "🔒 Normal mode");
+  }
+
+  setTimeout(() => tapCount = 0, 2000);
+};
+
+// 🔁 Load config
+configRef.on("value", snap => {
+  const data = snap.val();
+  if (!data) return;
+
+  peopleList = Object.keys(data);
+
+  if (!appStarted) {
+    startApp();
+    appStarted = true;
+  }
+});
+
+function startApp() {
+  const { dateStr: today } = getAESTDateParts();
+  const baseRef = db.ref("standup/" + today);
+  const peopleRef = baseRef.child("people");
+
+  baseRef.on("value", snap => {
+    const data = snap.val();
+    const { dateStr: todayStr, hour } = getAESTDateParts();
+
+    // Init
+    if (!data) {
+      const initial = {};
+      peopleList.forEach(p => initial[p] = false);
+
+      baseRef.set({
+        people: initial,
+        meta: { lastReset: todayStr }
+      });
+      return;
+    }
+
+    const lastReset = data.meta?.lastReset;
+
+    // ⏰ Early reset
+    if (hour >= 4 && lastReset !== todayStr) {
+      const reset = {};
+      peopleList.forEach(p => reset[p] = false);
+
+      baseRef.set({
+        people: reset,
+        meta: { lastReset: todayStr }
+      });
+      return;
+    }
+
+    // 🔄 Sync with config
+    const current = data.people || {};
+    const updated = { ...current };
+
+    peopleList.forEach(p => {
+      if (!(p in updated)) updated[p] = false;
+    });
+
+    Object.keys(updated).forEach(p => {
+      if (!peopleList.includes(p)) delete updated[p];
+    });
+
+    if (JSON.stringify(updated) !== JSON.stringify(current)) {
+      peopleRef.set(updated);
+      return;
+    }
+
+    render(updated);
+  });
+}
+
+// 🎨 Render
+function render(data) {
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+
+  Object.keys(data)
+    .sort((a, b) => data[a] - data[b])
+    .forEach(name => {
+      const isDone = data[name];
+
+      const div = document.createElement("div");
+      div.className = "person " + (isDone ? "done active" : "");
+
+      if (editMode) div.classList.add("edit");
+
+      const label = document.createElement("span");
+      label.innerText = isDone ? `✅ ${name}` : `💬 ${name}`;
+
+      const dot = document.createElement("div");
+      dot.className = "indicator";
+
+      div.appendChild(label);
+      div.appendChild(dot);
+
+      div.onclick = () => {
+        if (editMode) {
+          const { dateStr: today } = getAESTDateParts();
+          db.ref("standup/" + today + "/people/" + name)
+            .set(!data[name]); // 🔄
+        }
+      };
+
+      list.appendChild(div);
+    });
+}
+
+// ⏱ Idle tab reset
+setInterval(() => {
+  const { dateStr: today } = getAESTDateParts();
+  const baseRef = db.ref("standup/" + today);
+
+  baseRef.once("value", snap => {
+    const data = snap.val();
+    if (!data) return;
+
+    const { dateStr: todayStr, hour } = getAESTDateParts();
+    const lastReset = data.meta?.lastReset;
+
+    if (hour >= 4 && lastReset !== todayStr) {
+      const reset = {};
+      peopleList.forEach(p => reset[p] = false);
+
+      baseRef.set({
+        people: reset,
+        meta: { lastReset: todayStr }
+      });
+    }
+  });
+}, 60000);
+</script>
+
+</body>
+</html>
